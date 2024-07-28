@@ -1,0 +1,12 @@
+# created by virtualenv automatically
+bin
+etc
+include
+lib
+share
+pyvenv.cfg
+tmp
+.DS_Store
+.idea
+__pycache__
+gpt_models
