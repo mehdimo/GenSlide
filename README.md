@@ -6,20 +6,20 @@ Generating PowerPoint slides extracted from a text.
 ### Set up 
 Clone the repo: 
 ```commandline
-clone git http://github.com/mehdimo/GenSlide
+git clone http://github.com/mehdimo/GenSlide
 
 cd GenSlide
 ```
 
-then
+then, create a virtual environment and install packages.
 ```commandline
 python -m venv ./venv
 . ./venv/bin/activate
 
 pip install -r requirements.txt
 ```
-* Note: Use a Python != 3.9.7 for virtualenv. My version is 3.12. 
-* To learn more about gpt4all, see [here](https://docs.gpt4all.io/).
+* Note: Use a Python != 3.9.7 for virtualenv. `streamlit` won't work in that version. The version here is `3.12`. 
+* We used `gpt4ll` package to run a LLM server on a local machine. To learn more about gpt4all, see [here](https://docs.gpt4all.io/).
 
 ### RUN LLM Service
 1. Go to `llm-service` folder and run the `gpt.py` file.
@@ -37,4 +37,3 @@ cd frontend
 streamlit run ui.py
 ```
 It will open the UI in the browser. 
-
