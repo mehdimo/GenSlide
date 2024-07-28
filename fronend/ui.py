@@ -6,7 +6,6 @@ from slide_gen import generate_presentation
 FOLDER = "generated"
 
 def create_ui():
-    # global url, file, content, text, filename, f
     st.write("""
 # Gen Slides
 ### Generating powerpoint slides for your text
