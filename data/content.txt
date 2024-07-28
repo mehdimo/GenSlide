@@ -1,0 +1,5 @@
+Artificial Intelligence is an idea that has been captivating society since the mid-20th century.
+It began with science fiction familiarizing the world with the concept but the idea wasn't fully seen in the scientific manner until Alan Turing, a polymath, was curious about the feasibility of the concept.
+Turing's groundbreaking 1950 paper, "Computing Machinery and Intelligence," posed fundamental questions about machine reasoning similar to human intelligence, significantly contributing to the conceptual groundwork of AI.
+The development of AI was not very rapid at first because of the high costs and the fact that computers were not able to store commands.
+This changed during the 1956 Dartmouth Summer Research Project on AI where there was an inspiring call for AI research, setting the precedent for two decades of rapid advancements in the field.

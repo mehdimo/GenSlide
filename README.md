@@ -37,3 +37,13 @@ cd frontend
 streamlit run ui.py
 ```
 It will open the UI in the browser. 
+
+### Generate PowerPoint slides
+* In the UI's textbox, write the text that you want to create presentation based on it. You may use the text in file `content.txt` in `data` folder.
+* The generated `.pptx` file will be stored in the `frontend/generated` folder.
+
+User Interface:
+<img alt="UI Screenshot image" src="images/ui_screenshot.png">
+
+Generated slides in PowerPoint:
+<img alt="Generated slides in PowerPoint image" src="images/generated_slides.png">
