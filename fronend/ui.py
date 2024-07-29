@@ -3,8 +3,6 @@ import streamlit as st
 
 from slide_gen import generate_presentation
 
-FOLDER = "generated"
-
 def create_ui():
     st.write("""
 # Gen Slides
