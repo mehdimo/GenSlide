@@ -19,6 +19,8 @@ try:
     base_folder = os.path.dirname(__file__)
     base_folder = os.path.dirname(base_folder)
     gpt_models_folder = os.path.join(base_folder, "gpt_models/gpt4all/")
+    if not os.path.exists(gpt_models_folder):
+        os.makedirs(gpt_models_folder, exist_ok=True)
     model_folder = os.environ.get("MODEL_PATH", gpt_models_folder)
     llm_model = GPT4All(model_name=LLM_MODEL_NAME, model_path=model_folder)
 except Exception:
