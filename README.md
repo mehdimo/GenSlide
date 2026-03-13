@@ -104,6 +104,8 @@ streamlit run frontend/ui.py
 
 The app opens in your browser at `http://localhost:8501`.
 
+> In local mode run at the first time, it takes more time to download the model on machine. 
+
 ---
 
 ## Usage
