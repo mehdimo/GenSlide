@@ -133,6 +133,15 @@ Each deck includes:
 
 The visual theme is "Midnight Executive" — navy dominant background, ice-blue accents, pale content slides — designed to look professional out of the box.
 
+User interface to accept PDF file:
+<img src="images/screenshot_01.png">
+
+Steps that generated slides:
+<img src="images/screenshot_02.png">
+
+Generated slides sample:
+<img src="images/screenshot_03.png">
+
 ---
 
 ## Extending the system
