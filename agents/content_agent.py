@@ -1,26 +1,14 @@
 """
 Content agent node for the GenSlide LangGraph pipeline.
 
-Responsibilities:
-    - Receive state["outline"] (List[str] of slide titles) from the orchestrator
-    - For each title, call GPT-4o to write bullet points and speaker notes
-    - Respect any revision feedback when rewriting slides
-    - Write List[SlideContent] into state["slides"]
-    - Write a human-readable error into state["error"] on failure
+Uses a single unified prompt for all LLM providers (OpenAI and local).
+The parser uses a 3-strategy fallback chain to extract usable slide
+content from any model output, regardless of formatting quality.
 
-Design decisions:
-    Parallelism  : Slides are generated concurrently using ThreadPoolExecutor
-                   to minimise wall-clock time (a 10-slide deck takes ~1s
-                   instead of ~10s when calls are sequential).
-    Temperature  : 0.5 — slightly higher than the orchestrator to allow
-                   varied, natural-sounding bullet phrasing.
-    Retry        : Each slide call is retried once on transient failures
-                   before the whole node errors out.
-    Context      : Full parsed_text is sent with every slide call so GPT-4o
-                   can draw accurate, grounded facts — not hallucinated filler.
-    Feedback     : On revision iterations, the previous slide content is
-                   included so the model makes targeted edits rather than
-                   rewriting everything from scratch.
+Parallelism:
+    OpenAI  → ThreadPoolExecutor(max_workers=6) — independent cloud calls
+    Local   → Sequential (max_workers=1) — CPU inference; parallel calls
+              would thrash memory and be slower than sequential
 """
 
 import json
@@ -30,122 +18,125 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from graph.state import AgentState, SlideContent
+from llm.llm_provider import get_llm, get_provider_name
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# LLM setup
-# ---------------------------------------------------------------------------
-
-llm = ChatOpenAI(
-    model="gpt-4o",
-    temperature=0.5,
-    max_tokens=512,
-    response_format={"type": "json_object"},
-)
-
-# ---------------------------------------------------------------------------
-# Prompts
+# Unified prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
-You are an expert slide content writer. Your job is to write the body \
-content for a single presentation slide.
+You are a slide content writer. Write the content for a single \
+PowerPoint slide.
 
-Given:
-  - A slide title
-  - The full source text the presentation is based on
-  - (Optionally) previous content for this slide and revision instructions
+Given a slide title and source text, return a JSON object with \
+exactly these three keys:
 
-Produce a JSON object with exactly these three keys:
+  "title"         : string — the slide title, copied exactly
+  "bullets"       : array of 3 to 5 strings — concise bullet points
+                    drawn from the source text; each bullet max 15 words;
+                    no leading dashes or bullet characters
+  "speaker_notes" : string — 2 to 4 sentences for the presenter,
+                    expanding on the bullets in natural spoken prose;
+                    do not repeat bullet text verbatim
 
-  "title"         : string — the slide title (echo it back unchanged)
-  "bullets"       : array of 3 to 5 strings — concise, informative bullet \
-points drawn from the source text. Each bullet should be one sentence \
-(max 15 words). No bullet should start with a dash or bullet character.
-  "speaker_notes" : string — 2 to 4 sentences expanding on the bullets, \
-written as natural spoken prose for the presenter. Do NOT repeat bullet \
-text verbatim.
-
-Return ONLY the JSON object. No markdown fences, no extra keys, no preamble.
+Return ONLY a JSON object. Example:
+{
+  "title": "The slide title",
+  "bullets": ["First point", "Second point", "Third point"],
+  "speaker_notes": "Spoken notes for the presenter."
+}
 """.strip()
 
-REVISION_SYSTEM_PROMPT = """
-You are an expert slide content writer performing a targeted revision.
+REVISION_SUFFIX = """
 
-The user has reviewed the deck and provided feedback. Your job is to \
-revise the content for a single slide based on that feedback.
+The user requested changes: "{feedback}"
 
-Only change what the feedback asks for. Preserve anything the feedback \
-does not mention. Return the same JSON shape as the original:
+Previous content for this slide:
+{prev_content}
 
-  "title"         : string
-  "bullets"       : array of 3 to 5 strings
-  "speaker_notes" : string
-
-Return ONLY the JSON object. No markdown fences, no preamble.
+Revise only what the feedback asks for. Keep everything else the same.
+Return the updated JSON object only.
 """.strip()
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Parser — 3-strategy fallback chain
 # ---------------------------------------------------------------------------
 
-def _extract_slide_content(raw: str, expected_title: str) -> SlideContent:
+def _parse_response(raw: str, expected_title: str) -> SlideContent:
     """
-    Parse the JSON response for a single slide.
-    Validates required keys and coerces types.
-    """
-    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    Extract SlideContent from the model response.
 
+    Tries in order:
+        1. Full JSON parse — {"title":..., "bullets":[...], "speaker_notes":...}
+        2. Regex extraction of a JSON object block
+        3. Heuristic line-by-line extraction as a last resort
+    """
+    text = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+
+    # 1. Full JSON parse
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"GPT-4o returned non-JSON for slide '{expected_title}': {raw!r}"
-        ) from exc
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return _coerce(data, expected_title)
+    except json.JSONDecodeError:
+        pass
 
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected a JSON object, got {type(data)} for '{expected_title}'")
+    # 2. Extract first {...} block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group())
+            if isinstance(data, dict):
+                return _coerce(data, expected_title)
+        except json.JSONDecodeError:
+            pass
 
-    title   = str(data.get("title", expected_title)).strip() or expected_title
+    # 3. Heuristic: scrape any non-empty lines as bullets
+    logger.warning(
+        "Slide '%s': JSON parse failed, falling back to line extraction.",
+        expected_title,
+    )
+    lines = [
+        re.sub(r"^[-\*\•\d\.]+\s*", "", ln).strip()
+        for ln in text.splitlines()
+        if ln.strip() and len(ln.strip()) > 4
+    ]
+    bullets = [ln for ln in lines if ln][:5]
+    if not bullets:
+        bullets = ["Content could not be parsed for this slide."]
+
+    return SlideContent(
+        title=expected_title,
+        bullets=bullets,
+        speaker_notes="",
+    )
+
+
+def _coerce(data: dict, expected_title: str) -> SlideContent:
+    """Coerce a parsed dict into a SlideContent, filling missing fields safely."""
+    title   = str(data.get("title",   expected_title)).strip() or expected_title
     bullets = data.get("bullets", [])
-    notes   = str(data.get("speaker_notes", "")).strip()
+    notes   = str(data.get("speaker_notes", data.get("notes", ""))).strip()
 
-    # Coerce bullets to a clean list of strings
     if not isinstance(bullets, list):
+        # Model may have returned a single string or a dict
         bullets = [str(bullets)]
     bullets = [str(b).strip() for b in bullets if str(b).strip()]
 
     if not bullets:
-        raise ValueError(f"No bullets returned for slide '{expected_title}'")
+        bullets = ["Content could not be extracted for this slide."]
 
     return SlideContent(title=title, bullets=bullets, speaker_notes=notes)
 
 
-def _call_with_retry(messages: list, slide_title: str, max_retries: int = 1) -> str:
-    """
-    Invoke the LLM with one retry on failure, with a short backoff.
-    Returns the raw response content string.
-    """
-    for attempt in range(max_retries + 1):
-        try:
-            response = llm.invoke(messages)
-            return response.content
-        except Exception as exc:
-            if attempt < max_retries:
-                wait = 2 ** attempt   # 1s, 2s, ...
-                logger.warning(
-                    "Slide '%s' — attempt %d failed (%s). Retrying in %ds...",
-                    slide_title, attempt + 1, exc, wait,
-                )
-                time.sleep(wait)
-            else:
-                raise
-
+# ---------------------------------------------------------------------------
+# Single-slide generation with retry
+# ---------------------------------------------------------------------------
 
 def _generate_slide(
     title: str,
@@ -153,40 +144,47 @@ def _generate_slide(
     feedback: Optional[str],
     prev_slide: Optional[SlideContent],
     iteration: int,
+    max_retries: int = 1,
 ) -> SlideContent:
-    """
-    Generate content for a single slide. Used as the unit of work
-    for parallel execution.
-    """
     is_revision = bool(feedback and iteration > 1 and prev_slide)
 
     if is_revision:
-        system = SYSTEM_PROMPT  # reuse base system; revision context goes in human turn
+        prev_content = (
+            f"Bullets:\n"
+            + "\n".join(f"- {b}" for b in prev_slide["bullets"])
+            + f"\nSpeaker notes: {prev_slide['speaker_notes']}"
+        )
         human_content = (
             f"Slide title: {title}\n\n"
             f"Source text:\n{parsed_text}\n\n"
-            f"--- Previous slide content ---\n"
-            f"Bullets:\n"
-            + "\n".join(f"- {b}" for b in prev_slide["bullets"])
-            + f"\n\nSpeaker notes:\n{prev_slide['speaker_notes']}\n\n"
-            f"--- Revision feedback ---\n{feedback.strip()}\n\n"
-            f"Revise the slide above to address the feedback. "
-            f"Keep what the feedback does not mention."
+            + REVISION_SUFFIX.format(
+                feedback=feedback.strip(),
+                prev_content=prev_content,
+            )
         )
     else:
-        system = SYSTEM_PROMPT
-        human_content = (
-            f"Slide title: {title}\n\n"
-            f"Source text:\n{parsed_text}"
-        )
+        human_content = f"Slide title: {title}\n\nSource text:\n{parsed_text}"
 
     messages = [
-        SystemMessage(content=system),
+        SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=human_content),
     ]
+    llm = get_llm(temperature=0.5)
 
-    raw = _call_with_retry(messages, title)
-    return _extract_slide_content(raw, title)
+    for attempt in range(max_retries + 1):
+        try:
+            response = llm.invoke(messages)
+            return _parse_response(response.content, title)
+        except Exception as exc:
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                logger.warning(
+                    "Slide '%s' attempt %d failed (%s). Retrying in %ds…",
+                    title, attempt + 1, exc, wait,
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -198,21 +196,18 @@ def content_agent_node(state: AgentState) -> AgentState:
     LangGraph node: write slide content for every title in state["outline"].
 
     Reads:
-        state["outline"]      — List[str] of slide titles from orchestrator
-        state["parsed_text"]  — full source text (context for each slide)
-        state["feedback"]     — revision notes from human_approval (may be None)
-        state["slides"]       — previous slides (used on revision iterations)
+        state["outline"]      — List[str] of slide titles
+        state["parsed_text"]  — full source text
+        state["feedback"]     — revision notes (may be None)
+        state["slides"]       — previous slides (used on revisions)
         state["iteration"]    — current iteration count
 
     Writes:
-        state["slides"]   — List[SlideContent] in outline order
-        state["error"]    — error message on failure (else None)
+        state["slides"]  — List[SlideContent] in outline order
+        state["error"]   — error message on failure (else None)
     """
-    # Guard: propagate upstream errors
     if state.get("error"):
-        logger.warning(
-            "content_agent_node skipped — upstream error: %s", state["error"]
-        )
+        logger.warning("content_agent_node skipped — upstream error: %s", state["error"])
         return state
 
     outline     = state.get("outline") or []
@@ -224,27 +219,24 @@ def content_agent_node(state: AgentState) -> AgentState:
     if not outline:
         state["error"] = "Outline is empty — orchestrator may have failed."
         return state
-
     if not parsed_text:
         state["error"] = "parsed_text is empty — cannot generate slide content."
         return state
 
-    # Build a title → prev_slide lookup for revision context
-    prev_by_title: dict[str, SlideContent] = {
-        s["title"]: s for s in prev_slides
-    }
+    prev_by_title = {s["title"]: s for s in prev_slides}
+
+    # Local models run on a single CPU thread — parallel calls are slower
+    max_workers = 1 if get_provider_name() == "local" else min(len(outline), 6)
 
     logger.info(
-        "content_agent_node: generating %d slides (iteration=%d, parallel=True)",
-        len(outline),
-        iteration,
+        "content_agent_node: generating %d slides via %s (workers=%d, iteration=%d)",
+        len(outline), get_provider_name(), max_workers, iteration,
     )
 
     slides: list[Optional[SlideContent]] = [None] * len(outline)
     errors: list[str] = []
 
-    # Generate all slides concurrently — each is an independent GPT-4o call
-    with ThreadPoolExecutor(max_workers=min(len(outline), 6)) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
             executor.submit(
                 _generate_slide,
@@ -258,7 +250,7 @@ def content_agent_node(state: AgentState) -> AgentState:
         }
 
         for future in as_completed(future_to_index):
-            idx = future_to_index[future]
+            idx   = future_to_index[future]
             title = outline[idx]
             try:
                 slides[idx] = future.result()
@@ -267,29 +259,21 @@ def content_agent_node(state: AgentState) -> AgentState:
                 err_msg = f"Slide '{title}' failed: {exc}"
                 logger.error("  ✗ %s", err_msg)
                 errors.append(err_msg)
-                # Insert a placeholder so indexing stays consistent
                 slides[idx] = SlideContent(
                     title=title,
                     bullets=["Content could not be generated for this slide."],
                     speaker_notes="",
                 )
 
-    # Report partial failures as a warning, not a hard stop
     if errors:
-        state["error"] = (
-            f"{len(errors)} slide(s) failed to generate: "
-            + "; ".join(errors)
-        )
+        state["error"] = f"{len(errors)} slide(s) failed: " + "; ".join(errors)
         logger.warning("content_agent_node partial failure: %s", state["error"])
     else:
         state["error"] = None
 
     state["slides"] = [s for s in slides if s is not None]
-
     logger.info(
         "content_agent_node: completed %d/%d slides",
-        len(state["slides"]),
-        len(outline),
+        len(state["slides"]), len(outline),
     )
-
     return state
