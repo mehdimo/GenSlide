@@ -137,10 +137,10 @@ User interface to accept PDF file:
 <img src="images/screenshot_01.png">
 
 Steps that generated slides:
-<img src="images/screenshot_02.png">
+<img src="images/Screenshot_02.png">
 
 Generated slides sample:
-<img src="images/screenshot_03.png">
+<img src="images/Screenshot_03.png">
 
 ---
 
