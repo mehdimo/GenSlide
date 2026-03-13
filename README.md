@@ -2,6 +2,8 @@
 
 > Text and document to PowerPoint slide generation powered by a **LangGraph agentic pipeline** and **GPT-4o**.
 
+>For the single local LLM version explained [here](https://medium.com/data-science/how-to-use-llms-to-create-presentation-slides-genslide-a-step-by-step-guide-31f7588ffb5e) refer to [v0.1.0](https://github.com/mehdimo/GenSlide/tree/v0.1.0).
+
 GenSlide has been rebuilt from a single-LLM script into a fully agentic system. A multi-node LangGraph graph orchestrates the full pipeline — from parsing your input to building a polished `.pptx` — with a human-in-the-loop review step before finalising the deck.
 
 ---
@@ -70,9 +72,17 @@ pip install -r requirements.txt
 
 ### Configure
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root and add the followings:
+
+To run with a local LLM: 
+```bash
+LLM_PROVIDER=local
+```
+
+You can choose to work with OpenAI too. You then need to add OpenAI API key:
 
 ```bash
+LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-...
 ```
 
